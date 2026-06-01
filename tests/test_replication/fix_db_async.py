@@ -26,8 +26,14 @@ def application_name():
 
 
 @pytest.fixture
-async def aconn(aconn):
-    await aconn.set_autocommit(True)
+async def aconn(request, aconn):
+    # Seems to be a bug in pytest fixture override scoping.
+    # Possibly fixed by https://github.com/pytest-dev/pytest/commit/46478fad53774fad76d829f51679824d0131a0b3  # noqa: E501
+    if "tests/test_replication/" in request.path.as_posix():
+        await aconn.set_autocommit(True)
+    if True:  # ASYNC
+        # Some kind of bug in pytest fixture override dependency calculations
+        request.node.fixturenames.append("anyio_backend")
     yield aconn
 
 

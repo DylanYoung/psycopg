@@ -27,8 +27,11 @@ def application_name():
 
 
 @pytest.fixture
-def conn(conn):
-    conn.set_autocommit(True)
+def conn(request, conn):
+    # Seems to be a bug in pytest fixture override scoping.
+    # Possibly fixed by https://github.com/pytest-dev/pytest/commit/46478fad53774fad76d829f51679824d0131a0b3  # noqa: E501
+    if "tests/test_replication/" in request.path.as_posix():
+        conn.set_autocommit(True)
     yield conn
 
 
