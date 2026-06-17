@@ -17,11 +17,11 @@ import sys
 import select
 import logging
 import selectors
-from asyncio import Event, TimeoutError, get_running_loop, wait_for
+from asyncio import Event, Future, TimeoutError, get_running_loop, wait_for
 from selectors import DefaultSelector
 
 from . import errors as e
-from .abc import RV, PQGen, PQGenConn, WaitFunc
+from .abc import RV, AsyncWaitFunc, PQGen, PQGenConn, WaitFunc
 from ._enums import Ready as Ready
 from ._enums import Wait as Wait  # re-exported
 from ._cmodule import _psycopg
@@ -125,7 +125,82 @@ def wait_conn(gen: PQGenConn[RV], interval: float = 0.0) -> RV:
         return rv
 
 
-async def wait_async(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
+def _call_wait_with_result(
+    wait: WaitFunc,
+    fut: Future[Ready | int],
+    gen: PQGen[Ready | int],
+    fileno: int,
+    interval: float,
+) -> None:
+    try:
+        ready = wait(gen, fileno, interval)
+        fut.set_result(ready)
+    except BaseException as e:
+        fut.set_exception(e)
+
+
+def _ready_gen(state: Wait) -> PQGen[Ready | int]:
+    return (yield state)
+
+
+def make_wait_async(wait: WaitFunc) -> AsyncWaitFunc:
+    async def wait_async(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
+        if interval is None:
+            raise ValueError("indefinite wait not supported anymore")
+
+        ready = 0
+        s: Wait
+
+        try:
+            s = next(gen)
+
+            # Do this after calling next the first time for performance
+            loop = get_running_loop()
+            end = loop.time() + interval
+            done = False
+
+            def mark_done() -> None:
+                nonlocal done
+                done = True
+
+            while True:
+                ready = wait(_ready_gen(s), fileno, 0.0)
+                if not ready:
+                    h = loop.call_at(end, mark_done)
+                    while True:
+                        fut = loop.create_future()
+                        loop.call_soon(
+                            _call_wait_with_result,
+                            wait,
+                            fut,
+                            _ready_gen(s),
+                            fileno,
+                            0.0,
+                        )
+                        if ready := await fut:
+                            h.cancel()
+                            break
+                        if done:
+                            break
+
+                s = gen.send(ready)
+                end = loop.time() + interval
+                done = False
+        except OSError as ex:
+            # Assume the connection was closed
+            raise e.OperationalError("connection socket closed") from ex
+        except StopIteration as ex:
+            rv: RV = ex.value
+            return rv
+
+    wait_async.__name__ = f"wait_{wait.__name__.split('_')[-1]}_async"
+    return wait_async
+
+
+wait_selector_async = make_wait_async(wait_selector)
+
+
+async def wait_loop_async(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
     """
     Coroutine waiting for a generator to complete.
 
@@ -290,6 +365,9 @@ def wait_select(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
         return rv
 
 
+wait_select_async = make_wait_async(wait_select)
+
+
 if hasattr(selectors, "EpollSelector"):
     _epoll_evmasks = {
         WAIT_R: select.EPOLLONESHOT | select.EPOLLIN,
@@ -345,6 +423,9 @@ def wait_epoll(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
     except StopIteration as ex:
         rv: RV = ex.value
         return rv
+
+
+wait_epoll_async = make_wait_async(wait_epoll)
 
 
 if hasattr(selectors, "PollSelector"):
@@ -404,6 +485,9 @@ def wait_poll(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
         return rv
 
 
+wait_poll_async = make_wait_async(wait_poll)
+
+
 def _is_select_patched() -> bool:
     """
     Detect if some greenlet library has patched the select library.
@@ -426,6 +510,7 @@ def _is_select_patched() -> bool:
 
 if _psycopg:
     wait_c = _psycopg.wait_c
+    wait_c_async = make_wait_async(wait_c)
 
 
 # Choose the best wait strategy for the platform.
@@ -434,6 +519,21 @@ if _psycopg:
 # so we also offer more finely tuned implementations.
 
 wait: WaitFunc
+wait_async: AsyncWaitFunc
+
+# Allow the user to choose a specific async function for testing
+if "PSYCOPG_ASYNC_WAIT_FUNC" in os.environ:
+    fname = os.environ["PSYCOPG_ASYNC_WAIT_FUNC"]
+    if (
+        not fname.startswith("wait_")
+        or not fname.endswith("_async")
+        or fname not in globals()
+    ):
+        raise ImportError(
+            "PSYCOPG_ASYNC_WAIT_FUNC should be the name of an available async"
+            f" wait function; got {fname!r}"
+        )
+    wait_async = globals()[fname]
 
 # Allow the user to choose a specific function for testing
 if "PSYCOPG_WAIT_FUNC" in os.environ:
@@ -462,3 +562,7 @@ elif hasattr(selectors, "PollSelector"):
 
 else:
     wait = wait_selector
+
+# default wait_async to the async version of wait
+if "wait_async" not in globals():
+    wait_async = globals()[wait.__name__ + "_async"]
