@@ -21,7 +21,7 @@ from asyncio import Event, Future, TimeoutError, get_running_loop, wait_for
 from selectors import DefaultSelector
 
 from . import errors as e
-from .abc import RV, AsyncWaitFunc, PQGen, PQGenConn, WaitFunc
+from .abc import RV, AsyncWaitFunc, PQGen, PQGenConn, WaitConnFunc, WaitFunc
 from ._enums import Ready as Ready
 from ._enums import Wait as Wait  # re-exported
 from ._cmodule import _psycopg
@@ -120,6 +120,69 @@ def wait_conn(gen: PQGenConn[RV], interval: float = 0.0) -> RV:
                 fileno, s = gen.send(ready)
                 sel.register(fileno, s)
 
+    except StopIteration as ex:
+        rv: RV = ex.value
+        return rv
+
+
+def _call_wait_conn_with_result(
+    wait: WaitConnFunc,
+    fut: Future[Ready | int],
+    gen: PQGenConn[Ready | int],
+    interval: float,
+) -> None:
+    try:
+        val = wait(gen, interval)
+        fut.set_result(val)
+    except Exception as e:
+        fut.set_exception(e)
+
+
+def _ready_gen_conn(fileno: int, state: Wait) -> PQGenConn[Ready | int]:
+    return (yield fileno, state)
+
+
+async def wait_conn_async(gen: PQGenConn[RV], interval: float = 0.0) -> RV:
+    if interval is None:
+        raise ValueError("indefinite wait not supported anymore")
+
+    ready = 0
+    s: Wait
+
+    try:
+        fileno, s = next(gen)
+
+        loop = get_running_loop()
+        end = loop.time() + interval
+        done = False
+
+        def mark_done() -> None:
+            nonlocal done
+            done = True
+
+        while True:
+            ready = wait_conn(_ready_gen_conn(fileno, s), 0.0)
+
+            if not ready:
+                h = loop.call_at(end, mark_done)
+                while True:
+                    fut = loop.create_future()
+                    loop.call_soon(
+                        _call_wait_conn_with_result,
+                        wait_conn,
+                        fut,
+                        _ready_gen_conn(fileno, s),
+                        0.0,
+                    )
+                    if ready := await fut:
+                        h.cancel()
+                        break
+                    if done:
+                        break
+            fileno, s = gen.send(ready)
+    except OSError as ex:
+        # Assume the connection was closed
+        raise e.OperationalError("connection socket closed") from ex
     except StopIteration as ex:
         rv: RV = ex.value
         return rv
@@ -261,7 +324,7 @@ async def wait_loop_async(gen: PQGen[RV], fileno: int, interval: float = 0.0) ->
         return rv
 
 
-async def wait_conn_async(gen: PQGenConn[RV], interval: float = 0.0) -> RV:
+async def wait_conn_loop_async(gen: PQGenConn[RV], interval: float = 0.0) -> RV:
     """
     Coroutine waiting for a connection generator to complete.
 

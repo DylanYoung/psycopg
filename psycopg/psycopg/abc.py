@@ -62,6 +62,10 @@ class WaitFunc(Protocol):
     def __call__(self, gen: PQGen[RV], fileno: int, interval: float = ...) -> RV: ...
 
 
+class WaitConnFunc(Protocol):
+    def __call__(self, gen: PQGenConn[RV], interval: float = ...) -> RV: ...
+
+
 class AsyncWaitFunc(Protocol):
     """
     Wait on the connection which generated `PQgen` and return its final result.
