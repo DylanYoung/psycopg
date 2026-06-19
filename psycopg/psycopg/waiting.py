@@ -184,6 +184,10 @@ async def wait_async(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
         return rv
 
 
+def f() -> None:
+    pass
+
+
 async def wait_conn_async(gen: PQGenConn[RV], interval: float = 0.0) -> RV:
     """
     Coroutine waiting for a connection generator to complete.
