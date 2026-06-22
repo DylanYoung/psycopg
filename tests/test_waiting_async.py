@@ -33,6 +33,10 @@ if True:  # ASYNC
             "wait_poll_async", marks=pytest.mark.skipif("not hasattr(select, 'poll')")
         ),
         pytest.param(
+            "wait_kqueue_async",
+            marks=pytest.mark.skipif("not hasattr(select, 'kqueue')"),
+        ),
+        pytest.param(
             "wait_c_async", marks=pytest.mark.skipif("not psycopg._cmodule._psycopg")
         ),
     ]
@@ -48,6 +52,9 @@ else:
         ),
         pytest.param(
             "wait_poll", marks=pytest.mark.skipif("not hasattr(select, 'poll')")
+        ),
+        pytest.param(
+            "wait_kqueue", marks=pytest.mark.skipif("not hasattr(select, 'kqueue')")
         ),
         pytest.param(
             "wait_c", marks=pytest.mark.skipif("not psycopg._cmodule._psycopg")
@@ -73,6 +80,7 @@ def tgen(wait, times=1):
         "wait_selector_async",
         "wait_select_async",
         "wait_epoll_async",
+        "wait_kqueue_async",
         "wait_poll_async",
         pytest.param(
             "wait_c", marks=pytest.mark.skipif("not psycopg._cmodule._psycopg")

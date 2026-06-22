@@ -29,6 +29,9 @@ waitfns = [
         "wait_epoll", marks=pytest.mark.skipif("not hasattr(select, 'epoll')")
     ),
     pytest.param("wait_poll", marks=pytest.mark.skipif("not hasattr(select, 'poll')")),
+    pytest.param(
+        "wait_kqueue", marks=pytest.mark.skipif("not hasattr(select, 'kqueue')")
+    ),
     pytest.param("wait_c", marks=pytest.mark.skipif("not psycopg._cmodule._psycopg")),
 ]
 
