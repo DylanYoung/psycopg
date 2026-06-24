@@ -703,6 +703,10 @@ elif selectors.DefaultSelector is getattr(selectors, "SelectSelector", None):
     # On Windows, SelectSelector should be the default.
     wait = wait_select
 
+elif selectors.DefaultSelector is getattr(selectors, "KqueueSelector", None):
+    # On Mac, KqueueSelector should be the default.
+    wait = wait_kqueue
+
 elif hasattr(selectors, "PollSelector"):
     # On linux, EpollSelector is the default. However, it hangs if the fd is
     # closed while polling.
