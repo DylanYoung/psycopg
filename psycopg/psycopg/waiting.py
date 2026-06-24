@@ -430,6 +430,128 @@ def wait_epoll(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
 wait_epoll_async = make_wait_async(wait_epoll)
 
 
+if hasattr(selectors, "KqueueSelector"):
+    from select import KQ_EV_ADD, KQ_EV_DISABLE, KQ_EV_ENABLE, KQ_FILTER_READ
+    from select import KQ_FILTER_WRITE, kevent, kqueue
+
+    _kqueue_filters: tuple[int, ...] = (
+        -9000,
+        KQ_FILTER_READ,  # WAIT_R
+        KQ_FILTER_WRITE,  # WAIT_W
+    )
+else:
+    _kqueue_filters = ()
+
+
+class wait_kqueue:
+    __slots__ = ("kq", "transition", "fileno")
+
+    def __init__(self, fileno: int) -> None:
+        self.fileno = fileno
+        self.open()
+
+        try:
+            enable_read = kevent(fileno, KQ_FILTER_READ, flags=KQ_EV_ENABLE)
+            enable_write = kevent(fileno, KQ_FILTER_WRITE, flags=KQ_EV_ENABLE)
+            disable_read = kevent(fileno, KQ_FILTER_READ, flags=KQ_EV_DISABLE)
+            disable_write = kevent(fileno, KQ_FILTER_WRITE, flags=KQ_EV_DISABLE)
+            xx_xx: list[kevent] = []
+            er_xx = [enable_read]
+            xx_ew = [enable_write]
+            dr_xx = [disable_read]
+            xx_dw = [disable_write]
+            er_ew = [enable_read, enable_write]
+            dr_dw = [disable_read, disable_write]
+            er_dw = [enable_read, disable_write]
+            dr_ew = [disable_read, enable_write]
+
+            # transition matrix: transition[old_state][new_state]
+            self.transition: list[list[list[kevent]]] = [
+                [xx_xx, er_dw, dr_ew, er_ew],
+                [dr_xx, xx_xx, dr_ew, xx_ew],
+                [xx_dw, er_dw, xx_xx, er_xx],
+                [dr_dw, xx_dw, dr_xx, xx_xx],
+            ]
+        except BaseException:
+            self.kq.close()
+            raise
+
+    def open(self) -> None:
+        fileno = self.fileno
+        self.kq = kq = kqueue()
+        try:
+            kq.control(
+                [
+                    kevent(fileno, KQ_FILTER_READ, flags=KQ_EV_ADD | KQ_EV_DISABLE),
+                    kevent(fileno, KQ_FILTER_WRITE, flags=KQ_EV_ADD | KQ_EV_DISABLE),
+                ],
+                0,
+            )
+        except BaseException:
+            kq.close()
+            raise
+
+    def close(self) -> None:
+        self.kq.close()
+
+    def __del__(self) -> None:
+        self.close()
+
+    def __call__(
+        self,
+        gen: PQGen[RV],
+        fileno: int,
+        interval: float = 0.0,
+    ) -> RV:
+        """
+        Wait for a generator using kqueue where supported.
+
+        Parameters are like for `wait()`. If it is detected that the best selector
+        strategy is `kqueue` then this function will be used instead of `wait`.
+
+        See also: https://man.openbsd.org/kqueue.2
+        """
+        if interval is None:
+            raise ValueError("indefinite wait not supported anymore")
+        try:
+            s = old_s = next(gen)
+        except StopIteration as ex:
+            rv: RV = ex.value
+            return rv
+
+        kq = self.kq
+        transition = self.transition
+        evs: list[kevent] | None = transition[0][s]
+
+        try:
+            while True:
+                ready = 0
+                if kq.closed:
+                    raise e.OperationalError("connection socket closed")
+                if not (events := kq.control(evs, 2, interval)):
+                    _check_fd_closed(fileno)
+                else:
+                    for event in events:
+                        if event.filter == KQ_FILTER_READ:
+                            ready |= READY_R
+                        else:
+                            ready |= READY_W
+                s = gen.send(ready)
+                if s != old_s:
+                    evs = transition[old_s][s]
+                    old_s = s
+                else:
+                    evs = None  # don't re-pass the events unless necessary
+
+        except (OSError, FileNotFoundError) as ex:
+            # FileNotFound raised when the socket is closed independently
+            # OSError is raised on a concurrent close
+            raise e.OperationalError("connection socket closed") from ex
+        except StopIteration as ex:
+            rv = ex.value
+            return rv
+
+
 if hasattr(selectors, "PollSelector"):
     _poll_evmasks = {
         WAIT_R: select.POLLIN,
