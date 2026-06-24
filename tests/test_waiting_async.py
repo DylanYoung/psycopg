@@ -74,6 +74,20 @@ def tgen(wait, times=1):
     return r
 
 
+async def call_wait(wait, gen, fileno, interval=0.0):
+    if isinstance(wait, type):
+        try:
+            wait_inst = wait(fileno)
+        except PermissionError:  # some tests pass a fake file descriptor
+            wait_inst = wait.__call__.__get__(object(), object)
+        try:
+            return await wait_inst(gen, fileno, interval)
+        finally:
+            if hasattr(wait_inst, "fileno"):
+                wait_inst.close()
+    return await wait(gen, fileno, interval)
+
+
 @pytest.mark.parametrize(
     "waitfn",
     [
@@ -150,7 +164,7 @@ async def test_wait_r(waitfn, event, nevents, ready, interval, request):
             ev.set()
             # Wait for socket ready to read or timing out
             t0 = time.time()
-            r = await waitfn(tgen(wait, times=nevents), s.fileno(), interval)
+            r = await call_wait(waitfn, tgen(wait, times=nevents), s.fileno(), interval)
             dt = time.time() - t0
             # Check timing and received waiting state
             assert r == ready
@@ -209,7 +223,7 @@ async def test_wait_r_no_linux(waitfn, nevents, ready, interval, request):
         ev.set()
         # Wait for socket ready to read or timing out
         t0 = time.time()
-        r = await waitfn(tgen(wait, times=nevents), rs.fileno(), interval)
+        r = await call_wait(waitfn, tgen(wait, times=nevents), rs.fileno(), interval)
         dt = time.time() - t0
         # Check timing and received waiting state
         assert r == ready
@@ -264,7 +278,7 @@ async def test_wait_r_nowait(waitfn, event, nevents, ready, request):
             ev1.set()
             await ev2.wait()
             t0 = time.time()
-            r = await waitfn(tgen(wait, times=nevents), s.fileno())
+            r = await call_wait(waitfn, tgen(wait, times=nevents), s.fileno())
             dt = time.time() - t0
             ev3.set()  # unblock the unblocker
             if check_timing(request):
@@ -289,7 +303,7 @@ async def test_wait_w(waitfn, event, nevents, request):
     ws.setblocking(False)
     with rs, ws:
         t0 = time.time()
-        r = await waitfn(tgen(wait, times=nevents), ws.fileno(), 0.5)
+        r = await call_wait(waitfn, tgen(wait, times=nevents), ws.fileno(), 0.5)
         dt = time.time() - t0
         # Check timing and received waiting state
         assert r == waiting.Ready.W
@@ -304,7 +318,7 @@ async def test_wait(pgconn, waitfn, interval):
 
     pgconn.send_query(b"select 1")
     gen = generators.execute(pgconn)
-    (res,) = await waitfn(gen, pgconn.socket, interval)
+    (res,) = await call_wait(waitfn, gen, pgconn.socket, interval)
     assert res.status == ExecStatus.TUPLES_OK
 
 
@@ -316,7 +330,7 @@ async def test_wait_bad(pgconn, waitfn):
     gen = generators.execute(pgconn)
     pgconn.finish()
     with pytest.raises(psycopg.OperationalError):
-        await waitfn(gen, pgconn.socket)
+        await call_wait(waitfn, gen, pgconn.socket)
 
 
 @pytest.mark.slow
@@ -339,7 +353,7 @@ async def test_wait_timeout(pgconn, waitfn):
         except StopIteration as ex:
             return ex.value
 
-    (res,) = await waitfn(gen_wrapper(), pgconn.socket, interval=0.1)
+    (res,) = await call_wait(waitfn, gen_wrapper(), pgconn.socket, interval=0.1)
     assert res.status == ExecStatus.TUPLES_OK
     ds = [t1 - t0 for t0, t1 in zip(ts[:-1], ts[1:])]
     assert len(ds) >= 5
@@ -366,7 +380,7 @@ async def test_wait_no_busy_loop(pgconn, waitfns):
         except StopIteration as ex:
             return ex.value
 
-    (res,) = await waitfn(gen_wrapper(), pgconn.socket, 0.3)
+    (res,) = await call_wait(waitfn, gen_wrapper(), pgconn.socket, 0.3)
     assert res.status == ExecStatus.TUPLES_OK
     assert ncalls < 5
 
@@ -394,9 +408,9 @@ async def test_wait_large_fd(dsn, waitfn):
             gen = generators.execute(pgconn)
             if waitfn.__name__ in ("wait_select", "wait_select_async"):
                 with pytest.raises(ValueError):
-                    await waitfn(gen, pgconn.socket)
+                    await call_wait(waitfn, gen, pgconn.socket)
             else:
-                (res,) = await waitfn(gen, pgconn.socket)
+                (res,) = await call_wait(waitfn, gen, pgconn.socket)
                 assert res.status == ExecStatus.TUPLES_OK
         finally:
             pgconn.finish()
@@ -425,7 +439,7 @@ async def test_socket_closed(dsn, waitfn, pgconn):
     ) as ex:
         t0 = time.time()
         gen = generators.execute(pgconn)
-        await waitfn(gen, pgconn.socket, 0.1)
+        await call_wait(waitfn, gen, pgconn.socket, 0.1)
 
     assert pgconn.status == ConnStatus.BAD
     assert isinstance(ex.value.__cause__, OSError)
@@ -444,7 +458,7 @@ async def test_wait_remote_closed(proxy, aconn_cls, waitfn):
         proxy.stop()
         with pytest.raises(psycopg.OperationalError):
             gen = generators.execute(conn.pgconn)
-            await waitfn(gen, conn.pgconn.socket, 0.1)
+            await call_wait(waitfn, gen, conn.pgconn.socket, 0.1)
 
 
 async def test_remote_closed(proxy, aconn_cls, caplog):
@@ -463,7 +477,7 @@ async def test_wait_timeout_none_unsupported(waitfn):
     waitfn = getattr(waiting, waitfn)
 
     with pytest.raises(ValueError):
-        await waitfn(tgen(waiting.Wait.R), 1, None)
+        await call_wait(waitfn, tgen(waiting.Wait.R), 1, None)
 
 
 def check_timing(request):

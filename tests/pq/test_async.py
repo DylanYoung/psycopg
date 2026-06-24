@@ -8,7 +8,14 @@ from psycopg.generators import execute
 
 
 def execute_wait(pgconn):
-    return psycopg.waiting.wait(execute(pgconn), pgconn.socket)
+    if isinstance(psycopg.waiting.wait, type):
+        wait_inst = psycopg.waiting.wait(pgconn.socket)
+        try:
+            return wait_inst(execute(pgconn), pgconn.socket)
+        finally:
+            wait_inst.close()
+    else:
+        return psycopg.waiting.wait(execute(pgconn), pgconn.socket)
 
 
 def test_send_query(pgconn):

@@ -31,6 +31,26 @@ pipeline_logger = logging.getLogger("pipeline")
 args: argparse.Namespace
 
 
+async def wait_async(gen, fileno):
+    if isinstance(waiting.wait_async, type):
+        wait_inst = waiting.wait_async(fileno)
+        try:
+            return await wait_inst(gen, fileno)
+        finally:
+            wait_inst.close()
+    return await waiting.wait_async(gen, fileno)
+
+
+def wait(gen, fileno):
+    if isinstance(waiting.wait, type):
+        wait_inst = waiting.wait(fileno)
+        try:
+            return wait_inst(gen, fileno)
+        finally:
+            wait_inst.close()
+    return waiting.wait(gen, fileno)
+
+
 class LoggingPGconn:
     """Wrapper for PGconn that logs fetched results."""
 
@@ -186,9 +206,7 @@ def pipeline_demo_pq(rows_to_send: int, logger: logging.Logger) -> None:
         results_queue,
     ):
         while results_queue:
-            fetched = waiting.wait(
-                pipeline_communicate(pgconn, commands), pgconn.socket
-            )
+            fetched = wait(pipeline_communicate(pgconn, commands), pgconn.socket)
             assert not commands, commands
             for results in fetched:
                 results_queue.popleft()
@@ -208,7 +226,7 @@ async def pipeline_demo_pq_async(rows_to_send: int, logger: logging.Logger) -> N
         results_queue,
     ):
         while results_queue:
-            fetched = await waiting.wait_async(
+            fetched = await wait_async(
                 pipeline_communicate(pgconn, commands), pgconn.socket
             )
             assert not commands, commands

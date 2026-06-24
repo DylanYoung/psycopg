@@ -9,6 +9,12 @@ from psycopg import pq, waiting
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 
+def wait(gen, socket):
+    if isinstance(w := waiting.wait, type):
+        return w(socket)(gen, socket)
+    return w(gen, socket)
+
+
 def test_connect_operationalerror_pgconn(generators, dsn, monkeypatch):
     """Check that when generators.connect() fails, the resulting
     OperationalError has a pgconn attribute set with needs_password.
@@ -83,12 +89,12 @@ def _run_pipeline_communicate(pgconn, generators, commands, expected_statuses):
     while len(actual_statuses) != len(expected_statuses):
         if commands:
             gen = generators.pipeline_communicate(pgconn, commands)
-            results = waiting.wait(gen, pgconn.socket)
+            results = wait(gen, pgconn.socket)
             for (result,) in results:
                 actual_statuses.append(result.status)
         else:
             gen = generators.fetch_many(pgconn)
-            results = waiting.wait(gen, pgconn.socket)
+            results = wait(gen, pgconn.socket)
             for result in results:
                 actual_statuses.append(result.status)
 

@@ -15,9 +15,9 @@ from collections.abc import Iterator
 import pytest
 
 import psycopg
-import psycopg.generators
 from psycopg import pq
 from psycopg.conninfo import make_conninfo
+from psycopg.generators import execute
 
 if TYPE_CHECKING:
     from psycopg.pq.abc import PGcancelConn, PGconn
@@ -44,6 +44,17 @@ def wait(
     assert (
         conn.status == pq.ConnStatus.OK
     ), f"unexpected connection status: {conn.error_message}"
+
+
+def execute_wait(pgconn):
+    if isinstance(psycopg.waiting.wait, type):
+        wait_inst = psycopg.waiting.wait(pgconn.socket)
+        try:
+            return wait_inst(execute(pgconn), pgconn.socket)
+        finally:
+            wait_inst.close()
+    else:
+        return psycopg.waiting.wait(execute(pgconn), pgconn.socket)
 
 
 def test_connectdb(dsn):
@@ -262,7 +273,7 @@ def test_transaction_status(pgconn):
     assert pgconn.transaction_status == pq.TransactionStatus.INTRANS
     pgconn.send_query(b"select 1")
     assert pgconn.transaction_status == pq.TransactionStatus.ACTIVE
-    psycopg.waiting.wait(psycopg.generators.execute(pgconn), pgconn.socket)
+    execute_wait(pgconn)
     assert pgconn.transaction_status == pq.TransactionStatus.INTRANS
     pgconn.finish()
     assert pgconn.transaction_status == pq.TransactionStatus.UNKNOWN
