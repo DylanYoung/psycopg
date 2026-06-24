@@ -20,7 +20,7 @@ from collections.abc import Generator, Iterator
 from . import errors as e
 from . import pq, waiting
 from .abc import RV, AdaptContext, ConnDict, ConnParam, Params, PQGen, Query
-from .abc import QueryNoTemplate
+from .abc import QueryNoTemplate, WaitFunc, WaitFuncInstance
 from ._tpc import Xid
 from .rows import Row, RowFactory, args_row, tuple_row
 from .adapt import AdaptersMap
@@ -66,6 +66,7 @@ class Connection(BaseConnection[Row]):
     server_cursor_factory: type[ServerCursor[Row]]
     row_factory: RowFactory[Row]
     _pipeline: Pipeline | None
+    wait_func: WaitFunc | WaitFuncInstance
 
     def __init__(
         self,
@@ -147,6 +148,11 @@ class Connection(BaseConnection[Row]):
         if context:
             rv._adapters = AdaptersMap(context.adapters)
         rv.prepare_threshold = prepare_threshold
+        if isinstance(waiting.wait, type):
+            rv.wait_func = waiting.wait(rv.pgconn.socket)
+        else:
+            rv.wait_func = waiting.wait
+
         return rv
 
     def __enter__(self) -> Self:
@@ -195,6 +201,8 @@ class Connection(BaseConnection[Row]):
         # TODO: maybe send a cancel on close, if the connection is ACTIVE?
 
         self.pgconn.finish()
+        if waiting.wait is not self.wait_func:
+            self.wait_func.close()  # type: ignore[union-attr]
 
     @overload
     def cursor(self, *, binary: bool = False) -> Cursor[Row]: ...
@@ -481,14 +489,14 @@ class Connection(BaseConnection[Row]):
         fd (i.e. not on connect and reset).
         """
         try:
-            return waiting.wait(gen, self.pgconn.socket, interval=interval)
+            return self.wait_func(gen, self.pgconn.socket, interval=interval)
         except _INTERRUPTED:
             if self.pgconn.transaction_status == ACTIVE:
                 # On Ctrl-C, try to cancel the query in the server, otherwise
                 # the connection will remain stuck in ACTIVE state.
                 self._try_cancel(timeout=5.0)
                 try:
-                    waiting.wait(gen, self.pgconn.socket, interval=interval)
+                    self.wait_func(gen, self.pgconn.socket, interval=interval)
                 except e.QueryCanceled:
                     pass  # as expected
             raise

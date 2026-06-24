@@ -320,6 +320,8 @@ class RenameAsyncToSync(ast.NodeTransformer):  # type: ignore
         "AsyncScheduler": "Scheduler",
         "AsyncServerCursor": "ServerCursor",
         "AsyncTransaction": "Transaction",
+        "AsyncWaitFunc": "WaitFunc",
+        "AsyncWaitFuncInstance": "WaitFuncInstance",
         "AsyncWriter": "Writer",
         "AsyncKwargsParam": "KwargsParam",
         "AsyncConninfoParam": "ConninfoParam",

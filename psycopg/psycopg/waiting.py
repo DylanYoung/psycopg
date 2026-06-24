@@ -19,7 +19,8 @@ from asyncio import get_running_loop, sleep
 from selectors import DefaultSelector
 
 from . import errors as e
-from .abc import RV, AsyncWaitFunc, PQGen, PQGenConn, WaitFunc
+from .abc import RV, AsyncWaitFunc, AsyncWaitFuncInstance, PQGen, PQGenConn, WaitFunc
+from .abc import WaitFuncInstance
 from ._enums import Ready as Ready
 from ._enums import Wait as Wait  # re-exported
 from ._cmodule import _psycopg
@@ -519,8 +520,8 @@ if _psycopg:
 # the selectors objects have a generic interface but come with some overhead,
 # so we also offer more finely tuned implementations.
 
-wait: WaitFunc
-wait_async: AsyncWaitFunc
+wait: WaitFunc | type[WaitFuncInstance]
+wait_async: AsyncWaitFunc | type[AsyncWaitFuncInstance]
 
 # Allow the user to choose a specific async function for testing
 if "PSYCOPG_ASYNC_WAIT_FUNC" in os.environ:

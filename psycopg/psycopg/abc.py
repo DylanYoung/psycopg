@@ -62,6 +62,20 @@ class WaitFunc(Protocol):
     def __call__(self, gen: PQGen[RV], fileno: int, interval: float = ...) -> RV: ...
 
 
+class WaitFuncInstance(Protocol):
+    """
+    Wait on the connection which generated `PQgen` and return its final result.
+    """
+
+    def __init__(self, fileno: int) -> None: ...
+
+    def __call__(self, gen: PQGen[RV], fileno: int, interval: float = ...) -> RV: ...
+
+    def open(self) -> None: ...
+
+    def close(self) -> None: ...
+
+
 class AsyncWaitFunc(Protocol):
     """
     Wait on the connection which generated `PQgen` and return its final result.
@@ -70,6 +84,22 @@ class AsyncWaitFunc(Protocol):
     async def __call__(
         self, gen: PQGen[RV], fileno: int, interval: float = ...
     ) -> RV: ...
+
+
+class AsyncWaitFuncInstance(Protocol):
+    """
+    Wait on the connection which generated `PQgen` and return its final result.
+    """
+
+    def __init__(self, fileno: int) -> None: ...
+
+    async def __call__(
+        self, gen: PQGen[RV], fileno: int, interval: float = ...
+    ) -> RV: ...
+
+    def open(self) -> None: ...
+
+    def close(self) -> None: ...
 
 
 # Adaptation types

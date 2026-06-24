@@ -16,8 +16,8 @@ from collections.abc import AsyncGenerator, AsyncIterator
 
 from . import errors as e
 from . import pq, waiting
-from .abc import RV, AdaptContext, ConnDict, ConnParam, Params, PQGen, Query
-from .abc import QueryNoTemplate
+from .abc import RV, AdaptContext, AsyncWaitFunc, AsyncWaitFuncInstance, ConnDict
+from .abc import ConnParam, Params, PQGen, Query, QueryNoTemplate
 from ._tpc import Xid
 from .rows import AsyncRowFactory, Row, args_row, tuple_row
 from .adapt import AdaptersMap
@@ -70,6 +70,7 @@ class AsyncConnection(BaseConnection[Row]):
     server_cursor_factory: type[AsyncServerCursor[Row]]
     row_factory: AsyncRowFactory[Row]
     _pipeline: AsyncPipeline | None
+    wait_func: AsyncWaitFunc | AsyncWaitFuncInstance
 
     def __init__(
         self,
@@ -168,6 +169,11 @@ class AsyncConnection(BaseConnection[Row]):
         if context:
             rv._adapters = AdaptersMap(context.adapters)
         rv.prepare_threshold = prepare_threshold
+        if isinstance(waiting.wait_async, type):
+            rv.wait_func = waiting.wait_async(rv.pgconn.socket)
+        else:
+            rv.wait_func = waiting.wait_async
+
         return rv
 
     async def __aenter__(self) -> Self:
@@ -216,6 +222,8 @@ class AsyncConnection(BaseConnection[Row]):
         # TODO: maybe send a cancel on close, if the connection is ACTIVE?
 
         self.pgconn.finish()
+        if waiting.wait_async is not self.wait_func:
+            self.wait_func.close()  # type: ignore[union-attr]
 
     @overload
     def cursor(self, *, binary: bool = False) -> AsyncCursor[Row]: ...
@@ -516,14 +524,18 @@ class AsyncConnection(BaseConnection[Row]):
         fd (i.e. not on connect and reset).
         """
         try:
-            return await waiting.wait_async(gen, self.pgconn.socket, interval=interval)
+            return await self.wait_func(gen, self.pgconn.socket, interval=interval)
         except _INTERRUPTED:
             if self.pgconn.transaction_status == ACTIVE:
                 # On Ctrl-C, try to cancel the query in the server, otherwise
                 # the connection will remain stuck in ACTIVE state.
                 await self._try_cancel(timeout=5.0)
                 try:
-                    await waiting.wait_async(gen, self.pgconn.socket, interval=interval)
+                    await self.wait_func(
+                        gen,
+                        self.pgconn.socket,
+                        interval=interval,
+                    )
                 except e.QueryCanceled:
                     pass  # as expected
             raise
