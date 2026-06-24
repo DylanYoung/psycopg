@@ -391,61 +391,81 @@ def wait_select(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
 wait_select_async = make_wait_async(wait_select)
 
 
-if hasattr(selectors, "EpollSelector"):
-    _epoll_evmasks = {
-        WAIT_R: select.EPOLLONESHOT | select.EPOLLIN,
-        WAIT_W: select.EPOLLONESHOT | select.EPOLLOUT,
-        WAIT_RW: select.EPOLLONESHOT | select.EPOLLIN | select.EPOLLOUT,
-    }
-else:
-    _epoll_evmasks = {}
+class wait_epoll:
+    __slots__ = ("ep", "transition", "fileno")
 
+    def __init__(self, fileno: int) -> None:
+        self.fileno = fileno
+        self.open()
 
-def wait_epoll(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
-    """
-    Wait for a generator using epoll where supported.
+        try:
+            xx_xx = 0
+            er_ew = select.EPOLLIN | select.EPOLLOUT
+            er = select.EPOLLIN
+            ew = select.EPOLLOUT
 
-    Parameters are like for `wait()`. If it is detected that the best selector
-    strategy is `epoll` then this function will be used instead of `wait`.
+            # transition vector: transition[new_state]
+            self.transition: list[int] = [xx_xx, er, ew, er_ew]
+        except BaseException:
+            self.ep.close()
+            raise
 
-    See also: https://linux.die.net/man/2/epoll_ctl
+    def open(self) -> None:
+        self.ep = select.epoll()
+        try:
+            # We don't need to register here but doing so allows us to use
+            # `modify` all the time in`__call__`
+            self.ep.register(self.fileno)
+        except BaseException:
+            self.ep.close()
+            raise
 
-    BUG: if the connection FD is closed, `epoll.poll()` hangs. Same for
-    EpollSelector. For this reason, wait_poll() is currently preferable.
-    To reproduce the bug:
+    def close(self) -> None:
+        self.ep.close()
 
-        export PSYCOPG_WAIT_FUNC=wait_epoll
-        pytest tests/test_concurrency.py::test_concurrent_close
-    """
-    if interval is None:
-        raise ValueError("indefinite wait not supported anymore")
-    try:
-        s = next(gen)
+    def __del__(self) -> None:
+        self.close()
 
-        if interval < 0:
-            interval = 0.0
+    def __call__(self, gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
+        """
+        Wait for a generator using epoll where supported.
 
-        with select.epoll() as epoll:
-            evmask = _epoll_evmasks[s]
-            epoll.register(fileno, evmask)
+        Parameters are like for `wait()`. If it is detected that the best selector
+        strategy is `epoll` then this function will be used instead of `wait`.
+
+        See also: https://linux.die.net/man/2/epoll_ctl
+        """
+        if interval is None:
+            raise ValueError("indefinite wait not supported anymore")
+        try:
+            s = old_s = next(gen)
+
+            if interval < 0:
+                interval = 0.0
+
+            if (ep := self.ep).closed:
+                raise e.OperationalError("connection socket closed")
+            ep.modify(fileno, (transition := self.transition)[s])
+
             while True:
-                if not (fileevs := epoll.poll(interval)):
-                    _check_fd_closed(fileno)
-                    gen.send(READY_NONE)
-                    continue
-                ev = fileevs[0][1]
                 ready = 0
-                if ev & select.EPOLLIN:
-                    ready = READY_R
-                if ev & select.EPOLLOUT:
-                    ready |= READY_W
+                if not (fileevs := ep.poll(interval)):
+                    _check_fd_closed(fileno)
+                else:
+                    ev = fileevs[0][1]
+                    if ev & select.EPOLLIN:
+                        ready = READY_R
+                    if ev & select.EPOLLOUT:
+                        ready |= READY_W
                 s = gen.send(ready)
-                evmask = _epoll_evmasks[s]
-                epoll.modify(fileno, evmask)
+                if ep.closed:
+                    raise e.OperationalError("connection socket closed")
+                if old_s != s:
+                    ep.modify(fileno, transition[old_s := s])
 
-    except StopIteration as ex:
-        rv: RV = ex.value
-        return rv
+        except StopIteration as ex:
+            rv: RV = ex.value
+            return rv
 
 
 wait_epoll_async = make_wait_async(wait_epoll)
