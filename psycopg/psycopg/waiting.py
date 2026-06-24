@@ -15,6 +15,7 @@ import sys
 import select
 import logging
 import selectors
+from typing import cast
 from asyncio import get_running_loop, sleep
 from selectors import DefaultSelector
 
@@ -131,8 +132,14 @@ def _ready_gen(state: Wait) -> PQGen[Ready | int]:
     return (yield state)
 
 
-def make_wait_async(wait: WaitFunc) -> AsyncWaitFunc:
-    async def wait_async(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
+def make_wait_async(
+    wait: WaitFunc | type[WaitFuncInstance],
+) -> AsyncWaitFunc | type[AsyncWaitFuncInstance]:
+    outer_wait = wait
+
+    async def wait_async(
+        self: AsyncWaitFuncInstance, gen: PQGen[RV], fileno: int, interval: float = 0.0
+    ) -> RV:
         if interval is None:
             raise ValueError("indefinite wait not supported anymore")
 
@@ -150,6 +157,11 @@ def make_wait_async(wait: WaitFunc) -> AsyncWaitFunc:
             def mark_done() -> None:
                 nonlocal done
                 done = True
+
+            if isinstance(outer_wait, type):
+                wait = outer_wait.__call__.__get__(self)
+            else:
+                wait = outer_wait
 
             while True:
                 ready = wait(_ready_gen(s), fileno, 0.0)
@@ -174,8 +186,17 @@ def make_wait_async(wait: WaitFunc) -> AsyncWaitFunc:
             rv: RV = ex.value
             return rv
 
-    wait_async.__name__ = f"wait_{wait.__name__.split('_')[-1]}_async"
-    return wait_async
+    name = f"wait_{wait.__name__.split('_')[-1]}_async"
+    if not isinstance(wait, type):
+        wait_async.__name__ = name
+        return cast(AsyncWaitFunc, wait_async.__get__(object(), object))
+
+    class wait_async_cls(wait):  # type: ignore[valid-type,misc]
+        __call__ = wait_async
+
+    wait_async_cls.__name__ = name
+
+    return wait_async_cls
 
 
 wait_selector_async = make_wait_async(wait_selector)
@@ -550,6 +571,9 @@ class wait_kqueue:
         except StopIteration as ex:
             rv = ex.value
             return rv
+
+
+wait_kqueue_async = make_wait_async(wait_kqueue)
 
 
 if hasattr(selectors, "PollSelector"):
