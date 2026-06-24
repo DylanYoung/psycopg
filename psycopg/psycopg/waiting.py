@@ -727,9 +727,11 @@ elif selectors.DefaultSelector is getattr(selectors, "KqueueSelector", None):
     # On Mac, KqueueSelector should be the default.
     wait = wait_kqueue
 
-elif hasattr(selectors, "PollSelector"):
-    # On linux, EpollSelector is the default. However, it hangs if the fd is
-    # closed while polling.
+elif selectors.DefaultSelector is getattr(selectors, "EpollSelector", None):
+    # On Linux, EpollSelector should be the default.
+    wait = wait_epoll
+
+elif selectors.DefaultSelector is getattr(selectors, "PollSelector", None):
     wait = wait_poll
 
 else:
