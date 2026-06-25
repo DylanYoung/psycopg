@@ -57,7 +57,7 @@ else:
 
 
 class wait_selector:
-    __slots__ = ("selector", "fileno")
+    __slots__ = ("selector", "fileno", "last_state")
 
     def __init__(self, fileno: int) -> None:
         self.fileno = fileno
@@ -69,6 +69,7 @@ class wait_selector:
             # don't need to register here, but it allows us to use `modify`
             # in `__call__`.
             self.selector.register(self.fileno, WAIT_R)
+            self.last_state = WAIT_R
         except BaseException:
             self.selector.close()
             raise
@@ -96,12 +97,20 @@ class wait_selector:
         if interval is None:
             raise ValueError("indefinite wait not supported anymore")
         try:
-            s = old_s = next(gen)
-            sel = self.selector
-            if not sel.get_map():
-                raise e.OperationalError("connection socket closed")
-            sel.modify(fileno, s)
+            s = next(gen)
+        except StopIteration as ex:
+            rv: RV = ex.value
+            return rv
+
+        sel = self.selector
+        old_s = self.last_state
+
+        try:
             while True:
+                if not sel.get_map():
+                    raise e.OperationalError("connection socket closed")
+                if old_s != s:
+                    sel.modify(fileno, s)
                 if not (rlist := sel.select(timeout=interval)):
                     # Check if it was a timeout or we were disconnected
                     _check_fd_closed(fileno)
@@ -109,16 +118,14 @@ class wait_selector:
                 else:
                     ready = rlist[0][1]
                 s = gen.send(ready)
-                if not sel.get_map():
-                    raise e.OperationalError("connection socket closed")
-                if old_s != s:
-                    sel.modify(fileno, s)
 
         except (OSError, FileNotFoundError) as ex:
             raise e.OperationalError("connection socket closed") from ex
         except StopIteration as ex:
-            rv: RV = ex.value
+            rv = ex.value
             return rv
+        finally:
+            self.last_state = s
 
 
 def wait_conn(gen: PQGenConn[RV], interval: float = 0.0) -> RV:
