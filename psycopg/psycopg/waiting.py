@@ -456,7 +456,7 @@ wait_select_async = make_wait_async(wait_select)
 
 
 class wait_epoll:
-    __slots__ = ("ep", "transition", "fileno")
+    __slots__ = ("ep", "transition", "fileno", "last_state")
 
     def __init__(self, fileno: int) -> None:
         self.fileno = fileno
@@ -480,6 +480,7 @@ class wait_epoll:
             # We don't need to register here but doing so allows us to use
             # `modify` all the time in`__call__`
             self.ep.register(self.fileno)
+            self.last_state = 0
         except BaseException:
             self.ep.close()
             raise
@@ -502,17 +503,24 @@ class wait_epoll:
         if interval is None:
             raise ValueError("indefinite wait not supported anymore")
         try:
-            s = old_s = next(gen)
+            s = next(gen)
+        except StopIteration as ex:
+            rv: RV = ex.value
+            return rv
 
-            if interval < 0:
-                interval = 0.0
+        if interval < 0:
+            interval = 0.0
+        ep = self.ep
+        transition = self.transition
+        old_s = self.last_state
 
-            if (ep := self.ep).closed:
-                raise e.OperationalError("connection socket closed")
-            ep.modify(fileno, (transition := self.transition)[s])
-
+        try:
             while True:
                 ready = 0
+                if ep.closed:
+                    raise e.OperationalError("connection socket closed")
+                if old_s != s:
+                    ep.modify(fileno, transition[old_s := s])
                 if not (fileevs := ep.poll(interval)):
                     _check_fd_closed(fileno)
                 else:
@@ -522,14 +530,12 @@ class wait_epoll:
                     if ev & select.EPOLLOUT:
                         ready |= READY_W
                 s = gen.send(ready)
-                if ep.closed:
-                    raise e.OperationalError("connection socket closed")
-                if old_s != s:
-                    ep.modify(fileno, transition[old_s := s])
 
         except StopIteration as ex:
-            rv: RV = ex.value
+            rv = ex.value
             return rv
+        finally:
+            self.last_state = s
 
 
 wait_epoll_async = make_wait_async(wait_epoll)
