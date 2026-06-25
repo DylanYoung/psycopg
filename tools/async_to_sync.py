@@ -351,7 +351,6 @@ class RenameAsyncToSync(ast.NodeTransformer):  # type: ignore
         "cursor_async": "cursor",
         "ensure_table_async": "ensure_table",
         "find_insert_problem_async": "find_insert_problem",
-        "_is_asyncwaitfuncinstance": "_is_waitfuncinstance",
         "pool_async": "pool",
         "psycopg_pool.pool_async": "psycopg_pool.pool",
         "psycopg_pool.sched_async": "psycopg_pool.sched",

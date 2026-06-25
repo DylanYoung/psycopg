@@ -222,8 +222,8 @@ class AsyncConnection(BaseConnection[Row]):
         # TODO: maybe send a cancel on close, if the connection is ACTIVE?
 
         self.pgconn.finish()
-        if waiting._is_asyncwaitfuncinstance(self.wait_func):
-            self.wait_func.close()
+        if waiting.wait_async is not self.wait_func:
+            cast(AsyncWaitFuncInstance, self.wait_func).close()
 
     @overload
     def cursor(self, *, binary: bool = False) -> AsyncCursor[Row]: ...
