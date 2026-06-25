@@ -15,7 +15,7 @@ import sys
 import select
 import logging
 import selectors
-from typing import cast
+from typing import TypeGuard, cast
 from asyncio import get_running_loop, sleep
 from selectors import DefaultSelector
 
@@ -767,3 +767,15 @@ else:
 # default wait_async to the async version of wait
 if "wait_async" not in globals():
     wait_async = globals()[wait.__name__ + "_async"]
+
+
+def _is_waitfuncinstance(
+    wait_func: WaitFunc | WaitFuncInstance,
+) -> TypeGuard[WaitFuncInstance]:
+    return wait_func is not wait
+
+
+def _is_asyncwaitfuncinstance(
+    wait_func: AsyncWaitFunc | AsyncWaitFuncInstance,
+) -> TypeGuard[AsyncWaitFuncInstance]:
+    return wait_func is not wait_async
