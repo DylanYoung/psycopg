@@ -79,7 +79,13 @@ async def call_wait(wait, gen, fileno, interval=0.0):
         try:
             wait_inst = wait(fileno)
         except PermissionError:  # some tests pass a fake file descriptor
-            wait_inst = wait.__call__.__get__(object(), object)
+            if True:  # ASYNC
+                try:
+                    wait_inst = wait.__call__.__get__(object(), object)
+                except TypeError:
+                    wait_inst = wait._orig_wait_async  # type: ignore[attr-defined]
+            else:
+                wait_inst = wait.__call__.__get__(object(), object)
         try:
             return await wait_inst(gen, fileno, interval)
         finally:

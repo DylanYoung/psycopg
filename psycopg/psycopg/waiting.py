@@ -15,7 +15,8 @@ import sys
 import select
 import logging
 import selectors
-from typing import cast
+from types import CellType, FunctionType
+from typing import Any, cast
 from asyncio import get_running_loop, sleep
 from selectors import DefaultSelector
 
@@ -162,16 +163,16 @@ def _ready_gen(state: Wait) -> PQGen[Ready | int]:
 def make_wait_async(
     wait: WaitFunc | type[WaitFuncInstance],
 ) -> AsyncWaitFunc | type[AsyncWaitFuncInstance]:
-    outer_wait = wait
 
-    async def wait_async(
-        self: AsyncWaitFuncInstance, gen: PQGen[RV], fileno: int, interval: float = 0.0
-    ) -> RV:
+    inner_wait = cast(WaitFunc | WaitFuncInstance, wait)
+
+    async def wait_async(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
         if interval is None:
             raise ValueError("indefinite wait not supported anymore")
 
         ready: Ready | int
         s: Wait
+        wait = inner_wait
 
         try:
             s = next(gen)
@@ -184,11 +185,6 @@ def make_wait_async(
             def mark_done() -> None:
                 nonlocal done
                 done = True
-
-            if isinstance(outer_wait, type):
-                wait = outer_wait.__call__.__get__(self)
-            else:
-                wait = outer_wait
 
             while True:
                 ready = wait(_ready_gen(s), fileno, 0.0)
@@ -216,10 +212,44 @@ def make_wait_async(
     name = f"wait_{wait.__name__.split('_')[-1]}_async"
     if not isinstance(wait, type):
         wait_async.__name__ = name
-        return cast(AsyncWaitFunc, wait_async.__get__(object(), object))
+        return wait_async
+
+    def single_cell_closure(contents: Any) -> tuple[CellType]:
+        def capture() -> None:
+            contents
+
+        assert capture.__closure__ is not None
+        assert capture.__closure__[0].cell_contents is contents
+        assert len(capture.__closure__) == 1
+
+        return capture.__closure__
+
+    assert wait_async.__closure__ is not None
+    assert wait_async.__closure__[0].cell_contents is wait
+    assert len(wait_async.__closure__) == 1
+
+    def copy_wait_async(new_closure: tuple[CellType]) -> AsyncWaitFunc:
+        f = FunctionType(
+            wait_async.__code__,
+            wait_async.__globals__,
+            "__call__",
+            wait_async.__defaults__,
+            new_closure,
+        )
+        f.__kwdefaults__ = wait_async.__kwdefaults__
+        return staticmethod(f)
 
     class wait_async_cls(wait):  # type: ignore[valid-type,misc]
-        __call__ = wait_async
+        __slots__ = ("__call__",)
+
+        def __init__(self, fileno: int) -> None:
+            bound_wait = wait.__call__.__get__(self, type(self))
+            self.__call__ = copy_wait_async((single_cell_closure(bound_wait)))
+            super().__init__(fileno)
+
+        _orig_wait_async = copy_wait_async(
+            (single_cell_closure(wait.__call__.__get__(object(), object)))
+        )
 
     wait_async_cls.__name__ = name
 
