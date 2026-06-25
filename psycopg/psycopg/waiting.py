@@ -56,7 +56,7 @@ else:
 
 
 class wait_selector:
-    __slots__ = ("selector", "transition", "fileno")
+    __slots__ = ("selector", "fileno")
 
     def __init__(self, fileno: int) -> None:
         self.fileno = fileno
@@ -590,7 +590,10 @@ class wait_kqueue:
         kq = self.kq
         transition = self.transition
         evs: list[kevent] | None = transition[0][s]
-
+        # TODO: the following two lines are necessary until an open-coded
+        # version of wait_kqueue_async
+        kq.control(evs, 0)
+        evs = None
         try:
             while True:
                 ready = 0
