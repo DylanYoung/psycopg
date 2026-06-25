@@ -55,42 +55,69 @@ else:
         return
 
 
-def wait_selector(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
-    """
-    Wait for a generator using the best strategy available.
+class wait_selector:
+    __slots__ = ("selector", "transition", "fileno")
 
-    :param gen: a generator performing database operations and yielding
-        `Wait` pairs when it would block.
-    :param fileno: the file descriptor to wait on.
-    :param interval: interval (in seconds) to check for other interrupt, e.g.
-        to allow Ctrl-C.
-    :return: whatever `!gen` returns on completion.
+    def __init__(self, fileno: int) -> None:
+        self.fileno = fileno
+        self.open()
 
-    Consume `!gen`, scheduling `fileno` for completion when it is reported to
-    block. Once ready again send the ready state back to `!gen`.
-    """
-    if interval is None:
-        raise ValueError("indefinite wait not supported anymore")
-    try:
-        s = next(gen)
-        with DefaultSelector() as sel:
-            sel.register(fileno, (last_s := s))
+    def open(self) -> None:
+        self.selector = DefaultSelector()
+        try:
+            # don't need to register here, but it allows us to use `modify`
+            # in `__call__`.
+            self.selector.register(self.fileno, WAIT_R)
+        except BaseException:
+            self.selector.close()
+            raise
+
+    def close(self) -> None:
+        self.selector.close()
+
+    def __del__(self) -> None:
+        self.close()
+
+    def __call__(self, gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
+        """
+        Wait for a generator using the best strategy available.
+
+        :param gen: a generator performing database operations and yielding
+            `Wait` pairs when it would block.
+        :param fileno: the file descriptor to wait on.
+        :param interval: interval (in seconds) to check for other interrupt, e.g.
+            to allow Ctrl-C.
+        :return: whatever `!gen` returns on completion.
+
+        Consume `!gen`, scheduling `fileno` for completion when it is reported to
+        block. Once ready again send the ready state back to `!gen`.
+        """
+        if interval is None:
+            raise ValueError("indefinite wait not supported anymore")
+        try:
+            s = old_s = next(gen)
+            sel = self.selector
+            if not sel.get_map():
+                raise e.OperationalError("connection socket closed")
+            sel.modify(fileno, s)
             while True:
                 if not (rlist := sel.select(timeout=interval)):
                     # Check if it was a timeout or we were disconnected
                     _check_fd_closed(fileno)
-                    gen.send(READY_NONE)
-                    continue
-
-                ready = rlist[0][1]
+                    ready = 0
+                else:
+                    ready = rlist[0][1]
                 s = gen.send(ready)
-                if last_s != s:
-                    sel.unregister(fileno)
-                    sel.register(fileno, (last_s := s))
+                if not sel.get_map():
+                    raise e.OperationalError("connection socket closed")
+                if old_s != s:
+                    sel.modify(fileno, s)
 
-    except StopIteration as ex:
-        rv: RV = ex.value
-        return rv
+        except (OSError, FileNotFoundError) as ex:
+            raise e.OperationalError("connection socket closed") from ex
+        except StopIteration as ex:
+            rv: RV = ex.value
+            return rv
 
 
 def wait_conn(gen: PQGenConn[RV], interval: float = 0.0) -> RV:
