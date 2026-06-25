@@ -32,9 +32,11 @@ def main():
     logger.setLevel(args.loglevel)
 
     if getattr(args, "async"):
-        t_ins, t_outs, t_inserts, t_selects = asyncio.run(main_async(args))
+        results = asyncio.run(main_async(args))
     else:
-        t_ins, t_outs, t_inserts, t_selects = main_sync(args)
+        results = main_sync(args)
+
+    t_ins, t_outs, t_inserts, t_inserts_returning, t_insert_selects, t_selects = results
 
     if args.executemany:
         execute_descr = "executemany"
@@ -51,6 +53,10 @@ def main():
         output_timings(args, t_outs, "copy out")
     if t_inserts:
         output_timings(args, t_inserts, f"{execute_descr} insert")
+    if t_inserts_returning:
+        output_timings(args, t_inserts_returning, f"{execute_descr} insert returning")
+    if t_insert_selects:
+        output_timings(args, t_insert_selects, f"{execute_descr} insert then selects")
     if t_selects:
         output_timings(args, t_selects, f"{execute_descr} select")
 
@@ -66,7 +72,14 @@ def main():
 
 def main_sync(args: Namespace) -> tuple[list[float], ...]:
     test = CopyPutTest(args)
-    t_ins, t_outs, t_inserts, t_selects = [], [], [], []
+    t_ins, t_outs, t_inserts, t_inserts_returning, t_insert_selects, t_selects = (
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+    )
     if args.executemany:
         insert = executemany_insert_sync
         select = executemany_select_sync
@@ -76,10 +89,21 @@ def main_sync(args: Namespace) -> tuple[list[float], ...]:
     with psycopg.Connection.connect(args.dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(test.get_table_stmt())
-            n_in, n_out, n_insert, n_select = get_effective_repeats(args)
+            n_in, n_out, n_insert, n_insert_returning, n_insert_select, n_select = (
+                get_effective_repeats(args)
+            )
             for i in range(n_insert):
                 t_insert = insert(args, test, cur)
                 t_inserts.append(t_insert)
+                cur.execute(test.get_truncate_stmt())
+            for i in range(n_insert_returning):
+                t_insert_returning = insert(args, test, cur, returning="*")
+                t_inserts_returning.append(t_insert_returning)
+                cur.execute(test.get_truncate_stmt())
+            for i in range(n_insert_select):
+                t_insert_select = execute_insert_select_sync(args, test, cur)
+                t_insert_selects.append(t_insert_select)
+                cur.execute(test.get_truncate_stmt())
             for i in range(n_in):
                 t_in = copy_in_sync(args, test, cur)
                 if args.copy_in:
@@ -92,12 +116,19 @@ def main_sync(args: Namespace) -> tuple[list[float], ...]:
             for i in range(n_out):
                 t_out = copy_out_sync(args, test, cur)
                 t_outs.append(t_out)
-    return t_ins, t_outs, t_inserts, t_selects
+    return t_ins, t_outs, t_inserts, t_inserts_returning, t_insert_selects, t_selects
 
 
 async def main_async(args: Namespace) -> tuple[list[float], ...]:
     test = CopyPutTest(args)
-    t_ins, t_outs, t_inserts, t_selects = [], [], [], []
+    t_ins, t_outs, t_inserts, t_inserts_returning, t_insert_selects, t_selects = (
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+    )
     if args.executemany:
         insert = executemany_insert_async
         select = executemany_select_async
@@ -107,10 +138,20 @@ async def main_async(args: Namespace) -> tuple[list[float], ...]:
     async with await psycopg.AsyncConnection.connect(args.dsn) as conn:
         async with conn.cursor() as cur:
             await cur.execute(test.get_table_stmt())
-            n_in, n_out, n_insert, n_select = get_effective_repeats(args)
+            n_in, n_out, n_insert, n_insert_returning, n_insert_select, n_select = (
+                get_effective_repeats(args)
+            )
             for i in range(n_insert):
                 t_insert = await insert(args, test, cur)
                 t_inserts.append(t_insert)
+                await cur.execute(test.get_truncate_stmt())
+            for i in range(n_insert_returning):
+                t_insert_returning = await insert(args, test, cur, returning="*")
+                t_inserts_returning.append(t_insert_returning)
+                await cur.execute(test.get_truncate_stmt())
+            for i in range(n_insert_select):
+                t_insert_select = await execute_insert_select_async(args, test, cur)
+                t_insert_selects.append(t_insert_select)
                 await cur.execute(test.get_truncate_stmt())
             for i in range(n_in):
                 t_in = await copy_in_async(args, test, cur)
@@ -124,7 +165,7 @@ async def main_async(args: Namespace) -> tuple[list[float], ...]:
             for i in range(n_out):
                 t_out = await copy_out_async(args, test, cur)
                 t_outs.append(t_out)
-    return t_ins, t_outs, t_inserts, t_selects
+    return t_ins, t_outs, t_inserts, t_inserts_returning, t_insert_selects, t_selects
 
 
 def get_effective_repeats(args):
@@ -132,11 +173,16 @@ def get_effective_repeats(args):
     n_in = args.repeat if args.copy_in else 1 if args.copy_out or args.select else 0
     n_out = args.repeat if args.copy_out else 0
     n_insert = args.repeat if args.insert else 0
+    n_insert_returning = args.repeat if args.insert_returning else 0
+    n_insert_select = args.repeat if args.insert_select else 0
     n_select = args.repeat if args.select else 0
 
-    if all(r == 0 for r in (n_in, n_out, n_insert, n_select)):
+    if all(
+        r == 0
+        for r in (n_in, n_out, n_insert, n_insert_returning, n_insert_select, n_select)
+    ):
         print("Nothing to do.")
-    return n_in, n_out, n_insert, n_select
+    return n_in, n_out, n_insert, n_insert_returning, n_insert_select, n_select
 
 
 def output_timings(args, timings, description):
@@ -209,8 +255,8 @@ def copy_out_sync(args, test, cur):
     return tf - t0
 
 
-def executemany_insert_sync(args, test, cur):
-    insert = test.get_insert_stmt()
+def executemany_insert_sync(args, test, cur, returning=""):
+    insert = test.get_insert_stmt(returning=returning)
     params = [test.get_record() for _ in range(args.nrecs)]
     t0 = perf_counter()
     if args.cprofile:
@@ -235,12 +281,12 @@ def executemany_select_sync(args, test, cur):
     return tf - t0
 
 
-def execute_insert_sync(args, test, cur):
+def execute_insert_sync(args, test, cur, returning=""):
     if args.pipeline:
         context = cur.connection.pipeline()
     else:
         context = nullcontext()
-    insert = test.get_insert_stmt()
+    insert = test.get_insert_stmt(returning=returning)
     params = [test.get_record() for _ in range(args.nrecs)]
     with context as pipeline:
         t0 = perf_counter()
@@ -249,6 +295,32 @@ def execute_insert_sync(args, test, cur):
 
         for param in params:
             cur.execute(insert, param)
+        if pipeline is not None:
+            pipeline.sync()
+
+        if args.cprofile:
+            pr.disable()
+        tf = perf_counter()
+    return tf - t0
+
+
+def execute_insert_select_sync(args, test, cur):
+    if args.pipeline:
+        context = cur.connection.pipeline()
+    else:
+        context = nullcontext()
+    insert = test.get_insert_stmt(returning="id")
+    select = test.get_select_stmt()
+    params = [test.get_record() for _ in range(args.nrecs)]
+    with context as pipeline:
+        t0 = perf_counter()
+        if args.cprofile:
+            pr.enable()
+
+        for param in params:
+            cur.execute(insert, param)
+            sel_params = cur.fetchone()
+            cur.execute(select, sel_params)
         if pipeline is not None:
             pipeline.sync()
 
@@ -313,8 +385,8 @@ async def copy_out_async(args, test, cur):
     return tf - t0
 
 
-async def executemany_insert_async(args, test, cur):
-    insert = test.get_insert_stmt()
+async def executemany_insert_async(args, test, cur, returning=""):
+    insert = test.get_insert_stmt(returning=returning)
     params = [test.get_record() for _ in range(args.nrecs)]
     t0 = perf_counter()
     if args.cprofile:
@@ -339,12 +411,12 @@ async def executemany_select_async(args, test, cur):
     return tf - t0
 
 
-async def execute_insert_async(args, test, cur):
+async def execute_insert_async(args, test, cur, returning=""):
     if args.pipeline:
         context = cur.connection.pipeline()
     else:
         context = nullcontext()
-    insert = test.get_insert_stmt()
+    insert = test.get_insert_stmt(returning=returning)
     params = [test.get_record() for _ in range(args.nrecs)]
     async with context as pipeline:
         t0 = perf_counter()
@@ -355,6 +427,32 @@ async def execute_insert_async(args, test, cur):
             await cur.execute(insert, param)
         if pipeline is not None:
             await pipeline.sync()
+
+        if args.cprofile:
+            pr.disable()
+        tf = perf_counter()
+    return tf - t0
+
+
+async def execute_insert_select_async(args, test, cur):
+    if args.pipeline:
+        context = cur.connection.pipeline()
+    else:
+        context = nullcontext()
+    insert = test.get_insert_stmt(returning="id")
+    select = test.get_select_stmt()
+    params = [test.get_record() for _ in range(args.nrecs)]
+    with context as pipeline:
+        t0 = perf_counter()
+        if args.cprofile:
+            pr.enable()
+
+        for param in params:
+            await cur.execute(insert, param)
+            sel_params = await cur.fetchone()
+            await cur.execute(select, sel_params)
+        if pipeline is not None:
+            pipeline.sync()
 
         if args.cprofile:
             pr.disable()
@@ -413,7 +511,7 @@ SELECT * FROM testcopy WHERE id = {}
 """).format(sql.SQL("%b" if self.args.binary else "%t"))
         return stmt
 
-    def get_insert_stmt(self) -> Query:
+    def get_insert_stmt(self, returning: str = "") -> Query:
         fields = sql.SQL(", ").join(
             [sql.Identifier(f"f{i}") for i in range(self.args.nfields)]
         )
@@ -424,6 +522,8 @@ INSERT INTO testcopy ({}) VALUES ({})
             fields,
             sql.SQL(", ").join(formatter for _ in range(self.args.nfields)),
         )
+        if returning:
+            stmt = sql.SQL(" ").join((stmt, sql.SQL(f"RETURNING {returning}")))
         return stmt
 
     def get_truncate_stmt(self) -> Query:
@@ -482,6 +582,18 @@ def parse_cmdline() -> Namespace:
         action=BooleanOptionalAction,
         default=False,
         help="output insert timings and profile",
+    )
+    parser.add_argument(
+        "--insert-returning",
+        action=BooleanOptionalAction,
+        default=False,
+        help="output insert returning timings and profile",
+    )
+    parser.add_argument(
+        "--insert-select",
+        action=BooleanOptionalAction,
+        default=False,
+        help="output insert returning id then select timings and profile",
     )
     parser.add_argument(
         "--select",
