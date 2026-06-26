@@ -129,6 +129,14 @@ def run_tests(
             insert = execute_insert
             select = execute_select
 
+        old_wait = cur.connection.wait_func
+        if wait_func_changed(old_wait, bench.waitfunc):
+            old_wait = cur.connection.wait_func
+            if isinstance(bench.waitfunc, type):
+                cur.connection.wait_func = bench.waitfunc(cur.connection.pgconn.socket)
+            else:
+                cur.connection.wait_func = bench.waitfunc
+
         if bench.name in {"copy_out", "select"}:
             copy_in(bench, test, cur)
 
@@ -154,12 +162,24 @@ def run_tests(
             timing.append(t)
         cur.connection.rollback()
         timings.append((bench, timing))
+        if wait_func_changed(old_wait, bench.waitfunc):
+            if hasattr(cur.connection.wait_func, "close"):
+                cur.connection.wait_func.close()
+            cur.connection.wait_func = old_wait
         output_timings(out, bench, timing, variables, args.timing_file)
 
     if args.timing_file:
         args.timing_file.close()
 
     return timings
+
+
+def wait_func_changed(old_wait, waitfunc):
+    return (
+        hasattr(old_wait, "close")
+        and (not isinstance(old_wait, waitfunc))
+        or old_wait is not waitfunc
+    )
 
 
 def get_independent_variables(run):
@@ -525,6 +545,7 @@ def parse_cmdline() -> Namespace:
         "--nfields",
         "--colsize",
         "--writer",
+        "--waitfunc",
     ]
     parser.add_argument(
         "--run",
@@ -565,6 +586,29 @@ def parse_cmdline() -> Namespace:
         action=FlexibleBooleanOptionalAction,
         default=False,
         help="use pipeline mode for --select and --insert with --no-executemany",
+    )
+    waitfunc_choices: tuple[str, ...] = (
+        "wait_c",
+        "wait_selector",
+        "wait_select",
+        "wait_epoll",
+        "wait_poll",
+        "wait_kqueue",
+        "wait_loop",
+    )
+
+    def waitfunc_pred(s):
+        return s.startswith("wait_") and (not s.endswith("_async"))
+
+    waitfunc_choices = tuple((s for s in dir(psycopg.waiting) if waitfunc_pred(s)))
+    parser.add_argument(
+        "--waitfunc",
+        help="alternative wait function to use",
+        action=ModuleAttributeAction,
+        module=psycopg.waiting,
+        metavar=f"{{{', '.join(waitfunc_choices)}}}",
+        default=psycopg.waiting.wait,
+        transform_async=True,
     )
     parser.add_argument(
         "--default-selector",
