@@ -542,7 +542,7 @@ else:
 
 
 class wait_kqueue:
-    __slots__ = ("kq", "transition", "fileno")
+    __slots__ = ("kq", "transition", "fileno", "last_state")
 
     def __init__(self, fileno: int) -> None:
         self.fileno = fileno
@@ -585,6 +585,7 @@ class wait_kqueue:
                 ],
                 0,
             )
+            self.last_state = 0
         except BaseException:
             kq.close()
             raise
@@ -612,20 +613,23 @@ class wait_kqueue:
         if interval is None:
             raise ValueError("indefinite wait not supported anymore")
         try:
-            s = old_s = next(gen)
+            s = next(gen)
         except StopIteration as ex:
             rv: RV = ex.value
             return rv
 
         kq = self.kq
         transition = self.transition
-        evs: list[kevent] | None = transition[0][s]
-        # TODO: the following two lines are necessary until an open-coded
-        # version of wait_kqueue_async
-        kq.control(evs, 0)
-        evs = None
+        old_s = self.last_state
+        evs: list[kevent] | None
+
         try:
             while True:
+                if s != old_s:
+                    evs = transition[old_s][s]
+                    old_s = s
+                else:
+                    evs = None  # don't re-pass the events unless necessary
                 ready = 0
                 if kq.closed:
                     raise e.OperationalError("connection socket closed")
@@ -638,11 +642,6 @@ class wait_kqueue:
                         else:
                             ready |= READY_W
                 s = gen.send(ready)
-                if s != old_s:
-                    evs = transition[old_s][s]
-                    old_s = s
-                else:
-                    evs = None  # don't re-pass the events unless necessary
 
         except (OSError, FileNotFoundError) as ex:
             # FileNotFound raised when the socket is closed independently
@@ -651,6 +650,8 @@ class wait_kqueue:
         except StopIteration as ex:
             rv = ex.value
             return rv
+        finally:
+            self.last_state = s
 
 
 wait_kqueue_async = make_wait_async(wait_kqueue)
