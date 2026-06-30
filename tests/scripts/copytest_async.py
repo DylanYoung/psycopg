@@ -164,6 +164,9 @@ async def run_tests(
                 t = await select(bench, test, cur)
             elif bench.name == "copy_out":
                 t = await copy_out(bench, test, cur)
+            elif bench.name == "connect":
+                bench.dsn = args.dsn
+                t = await connect(bench, test, cur)
             else:
                 raise ValueError(f"Test '{bench.name}' does not exist.")
             timing.append(t)
@@ -207,7 +210,14 @@ def output_timings(out, bench, timings, variables, file=None):
         execute_descr = "pipelined execute"
     else:
         execute_descr = "execute"
-    if bench.name in {"copy_in", "copy_out", "insert", "insert_returning", "select"}:
+    if bench.name in {
+        "copy_in",
+        "copy_out",
+        "insert",
+        "insert_returning",
+        "select",
+        "connect",
+    }:
         description = bench.name.replace("_", " ")
     elif bench.name == "insert_select":
         description = "insert then select"
@@ -335,6 +345,20 @@ def get_statistics(timings):
         threshold = mean_val + 3 * stddev
 
     return (min_val, mean_val, stddev, len(timings))
+
+
+async def connect(args, test, cur):
+    connect = psycopg.AsyncConnection.connect
+    t0 = perf_counter()
+    if args.cprofile:
+        pr.enable()
+    for _ in range(args.nrecs):
+        async with await connect(args.dsn):
+            pass
+    if args.cprofile:
+        pr.disable()
+    tf = perf_counter()
+    return tf - t0
 
 
 async def copy_in(args, test, cur):
@@ -542,6 +566,7 @@ def parse_cmdline() -> Namespace:
         "insert-returning": "execute insert returning",
         "insert-select": "insert returning id then select",
         "select": "select",
+        "connect": "connect to the database and close the connection NRECS times",
     }
     valid_options = [
         "--repeat",
