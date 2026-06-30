@@ -272,8 +272,6 @@ class ConnectionPool(Generic[CT], BasePool):
             finally:
                 t1 = monotonic()
                 self._stats[self._REQUESTS_WAIT_MS] += int(1000.0 * (t1 - t0))
-        elif hasattr(conn.wait_func, "open"):
-            conn.wait_func.open()
 
         # Tell the connection it belongs to a pool to avoid closing on __exit__
         # Note that this property shouldn't be set while the connection is in
@@ -712,11 +710,6 @@ class ConnectionPool(Generic[CT], BasePool):
         Return a connection to the pool after usage.
         """
         self._reset_connection(conn)
-
-        # don't consume kernel resources monitoring idle connections
-        if hasattr(conn.wait_func, "close"):
-            conn.wait_func.close()
-
         if from_getconn:
             if conn.pgconn.transaction_status == TransactionStatus.UNKNOWN:
                 self._stats[self._CONNECTIONS_LOST] += 1
