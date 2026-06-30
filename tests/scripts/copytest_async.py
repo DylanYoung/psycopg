@@ -19,7 +19,7 @@ from typing import Any, Callable
 from inspect import isabstract
 from argparse import SUPPRESS, Action, ArgumentDefaultsHelpFormatter, ArgumentError
 from argparse import ArgumentParser, BooleanOptionalAction, Namespace
-from argparse import RawTextHelpFormatter
+from argparse import RawTextHelpFormatter, _SubParsersAction
 from functools import cached_property
 from contextlib import nullcontext
 
@@ -74,6 +74,13 @@ def main():
     else:
         logging.disable()
 
+    if args.subcommand == "compare":
+        if args.run:
+            logger.fatal("can't yet compare current runs: use '--timing-file'")
+            return
+        compare(args, out)
+        return
+
     if args.default_selector is not selectors.DefaultSelector:
         selectors.DefaultSelector = args.default_selector  # type: ignore[misc]
 
@@ -99,6 +106,188 @@ async def setup_and_run(args, out=print):
             return await run_tests(cur, args, out=out)
 
 
+def compare(args, out):
+    if f := args.compare_file:
+        header = (
+            "name",
+            "min_time",
+            "\u0394min_time",
+            "%min_time" "avg_time",
+            "\u0394avg_time" "%avg_time" "std_dev",
+            "\u0394std_dev" "%std_dev",
+            "variables",
+        )
+        if ":" in f:
+            f, mode = f.rsplit(":", 1)
+        else:
+            mode = "x"
+        args.compare_file = open(f, mode)
+        if "a" not in mode:
+            args.compare_file.write("\t".join(header) + "\n")
+    timing_sets = get_timing_sets(args.timing_file, args.across)
+    if not args.across:
+        for timing_set in timing_sets:
+            results = compare_set(timing_set)
+            output_compare_results(results, out, args.compare_file)
+    else:
+        results = [Timings() for _ in timing_sets[0]]
+        for timing_set in timing_sets:
+            r = compare_set(timing_set)
+            for i, t in enumerate(r):
+                results[i].append(t)
+        output_compare_results(
+            results[0], out, args.compare_file, output_name=True, is_baseline=True
+        )
+        for result in results[1:]:
+            output_compare_results(
+                result,
+                out,
+                args.compare_file,
+                output_name=True,
+                is_baseline=False,
+            )
+
+
+def get_timing_sets(timing_files, across=False):
+    if across:
+        timing_sets: list[Timings] = []
+    else:
+        timing_sets = [Timings()]
+    for i, fname in enumerate(timing_files):
+        with open(fname, "r") as f:
+            if not across:
+                timing_sets[0].extend(timings_from_file(f))
+            else:
+                timings = timings_from_file(f)
+                if (needed := (len(timings) - len(timing_sets))) > 0:
+                    timing_sets.extend(Timings() for _ in range(needed))
+                for j, timing in enumerate(timings):
+                    timing_sets[j].append(timing)
+    return timing_sets
+
+
+def compare_set(timing_set):
+    baseline = timing_set[0]
+    results = Timings()
+    for timing in timing_set:
+        results.append(compare_timing(baseline, timing))
+    return results
+
+
+def compare_timing(baseline: Timing, timing: Timing) -> Timing:
+    result = Timing([timing[0]])
+    result.name = timing.name
+    stats = (item for v in timing[1:4] for item in (v, None, None))
+    result.extend(stats)  # type: ignore[arg-type]
+    result.extend(timing[4:])
+    for i in range(1, 4):
+        v_base = baseline[i]
+        v_new = timing[i]
+        assert isinstance(v_new, float)
+        assert isinstance(v_base, float)
+        j = 2 + 3 * (i - 1)
+        diff = result[j] = v_base - v_new
+        result[j + 1] = diff / v_base
+    return result
+
+
+def timings_from_file(f):
+    timings = Timings()
+    constants = None
+    name = None
+    for line in f:
+        if line.startswith("# constants: "):
+            _, _, *constants = shlex.split(line)
+            timings.constants = constants
+        elif line.startswith("# name: "):
+            _, _, name = shlex.split(line)
+        elif line.startswith("name\tmin_time"):
+            continue
+        elif not line.startswith("#"):
+            timings.append(timing := Timing(line.strip().split("\t")))
+            for i in range(1, 4):
+                timing[i] = float(timing[i])
+            timing[i + 1] = int(timing[i + 1])
+    if name is None:
+        name = f.name
+    for timing in timings:
+        timing.name = name
+    return timings
+
+
+def output_compare_results(
+    results, out, file=None, output_name=False, is_baseline=None
+):
+    min_width = max(len(r[0]) + len(r[-1]) + 2 for r in results)
+    last_name = None
+    for i, result in enumerate(results):
+        if is_baseline is None and i == 0:
+            is_current_baseline = True
+        else:
+            is_current_baseline = is_baseline
+
+        if output_name and last_name != result.name:
+            if not is_current_baseline:
+                out.title(f"{result.name}")
+            else:
+                out.title(f"Baseline ({result.name})")
+            last_name = result.name
+
+        formatted_result = [result[0]]
+        formatted_result.extend(
+            item
+            for i in range(1, len(result) - 2, 3)
+            for item in (
+                "%.6f" % result[i],
+                "%+.6f" % result[i + 1],
+                "%+.2f%%" % (result[i + 2] * 100),
+            )
+        )
+        formatted_result.append("%i" % result[-2])
+        formatted_result.append(result[-1])
+        lead = f"{formatted_result[0]}[{formatted_result[-1]}]:"
+        formatted_timings = format_timings(
+            (
+                formatted_result[1],
+                formatted_result[4],
+                formatted_result[7],
+                formatted_result[10],
+            )
+        )
+        if not is_current_baseline:
+            out(
+                "{:{min_width}} {:>10} {:>12}\t[{}]".format(
+                    lead,
+                    formatted_result[3],
+                    formatted_result[2],
+                    formatted_timings,
+                    min_width=min_width,
+                )
+            )
+        else:
+            out(
+                "{:{min_width}} {}".format(lead, formatted_timings, min_width=min_width)
+            )
+
+        if file:
+            add_compare_result_to_file(file, formatted_result)
+    out("")
+
+
+def add_compare_result_to_file(file, result):
+    file.write("\t".join(result))
+
+
+class Timing(list[float | int | str]):
+    __slots__ = ("name",)
+    name: str
+
+
+class Timings(list[Timing]):
+    __slots__ = ("constants",)
+    constants: list[str]
+
+
 async def run_tests(
     cur: psycopg.AsyncCursor, args: Namespace, out: Callable[[str], None] = print
 ) -> list[tuple[Namespace, list[float]]]:
@@ -121,6 +310,8 @@ async def run_tests(
             mode = "x"
         args.timing_file = open(f, mode)
         if "a" not in mode:
+            if args.result_name:
+                args.timing_file.write(f"# name: {args.result_name}\n")
             args.timing_file.write(f"# constants: {format_bench_options(constants)}\n")
             args.timing_file.write("\t".join(header) + "\n")
 
@@ -550,6 +741,36 @@ COPY testcopy TO STDOUT{}
         return await cur.fetchall()
 
 
+def compare_parser(subparsers: _SubParsersAction[ArgumentParser]) -> ArgumentParser:
+    parser = subparsers.add_parser("compare", aliases=["comp"])
+    parser.add_argument(
+        "--timing-file",
+        help=(
+            "compare timings from one or more TIMING_FILE"
+            + "\nif `--across` is False, the first timing"
+            + " is taken as the baseline."
+            + "\nif true, the timings are compared pairwise across "
+            + " the files."
+        ),
+        nargs="+",
+        required=True,
+    )
+    parser.add_argument(
+        "--across",
+        "-x",
+        help="compare across timing files",
+        action=FlexibleBooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--compare-file",
+        help="compare across timing files",
+        action=FlexibleBooleanOptionalAction,
+        default=None,
+    )
+    return parser
+
+
 def parse_cmdline() -> Namespace:
     parser = ArgumentParser(
         description=__doc__,
@@ -615,6 +836,11 @@ def parse_cmdline() -> Namespace:
             + " include the MODE (default: x)"
         ),
         metavar="FILE[:MODE]",
+    )
+    parser.add_argument(
+        "--name",
+        help="A name for the results (used by the 'compare' subcommand)",
+        dest="result_name",
     )
     parser.add_argument("--repeat", type=int, default=1, help="number of repeats")
     parser.add_argument(
@@ -745,6 +971,10 @@ def parse_cmdline() -> Namespace:
         const=LOGGING_OPTIONS,
         default=DEFAULT_LOGLEVEL,
     )
+    subparsers = parser.add_subparsers(
+        dest="subcommand",
+    )
+    compare_parser(subparsers)
     # Added for help text
     # ARGSFILE isn't the right color, but this is close
     parser.add_argument(
