@@ -15,7 +15,7 @@ import sys
 import select
 import logging
 import selectors
-from asyncio import get_running_loop, sleep
+from asyncio import AbstractEventLoop, get_running_loop, sleep
 from selectors import DefaultSelector
 
 from . import errors as e
@@ -126,6 +126,19 @@ def wait_conn(gen: PQGenConn[RV], interval: float = 0.0) -> RV:
         return rv
 
 
+def _ensure_reader_writer_removed(
+    loop: AbstractEventLoop, fileno: int
+) -> OSError | None:
+    error = None
+    for remove in (loop.remove_reader, loop.remove_writer):
+        try:
+            remove(fileno)
+        except OSError as ex:
+            error = ex
+
+    return error
+
+
 async def wait_async(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
     """
     Coroutine waiting for a generator to complete.
@@ -190,6 +203,7 @@ async def wait_async(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
             end = loop.time() + interval
 
     except OSError as ex:
+        _ensure_reader_writer_removed(loop, fileno)
         # Assume the connection was closed
         raise e.OperationalError("connection socket closed") from ex
     except StopIteration as ex:
