@@ -276,6 +276,7 @@ async def wait_conn_async(gen: PQGenConn[RV], interval: float = 0.0) -> RV:
             end = loop.time() + interval
 
     except OSError as ex:
+        _ensure_reader_writer_removed(loop, fileno)
         # Assume the connection was closed
         raise e.OperationalError("connection socket closed") from ex
     except StopIteration as ex:
