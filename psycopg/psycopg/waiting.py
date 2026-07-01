@@ -177,19 +177,23 @@ async def wait_async(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
         ready |= state
 
     try:
-        try:
-            loop.add_reader(fileno, set_ready, READY_R)
-            loop.add_writer(fileno, set_ready, READY_W)
-        except OSError as ex:
-            # Assume the connection was closed
-            raise e.OperationalError("connection socket closed") from ex
+        loop.add_reader(fileno, set_ready, READY_R)
+        loop.add_writer(fileno, set_ready, READY_W)
+    except OSError as ex:
+        _ensure_reader_writer_removed(loop, fileno)
+        # Assume the connection was closed
+        raise e.OperationalError("connection socket closed") from ex
 
+    try:
         while True:
             ready = 0
-
             h = loop.call_at(end, set_done)
             while True:
-                await sleep(0)  # let the loop set ready or done
+                try:
+                    await sleep(0)  # let the loop set ready or done
+                except BaseException:
+                    h.cancel()
+                    raise
                 if ready := ready & s:
                     h.cancel()
                     break
@@ -202,15 +206,10 @@ async def wait_async(gen: PQGen[RV], fileno: int, interval: float = 0.0) -> RV:
             end = loop.time() + interval
 
     except StopIteration as ex:
-        _ensure_reader_writer_removed(loop, fileno)
         rv = ex.value
         return rv
-    except BaseException:
+    finally:
         _ensure_reader_writer_removed(loop, fileno)
-        raise
-    else:
-        if ex := _ensure_reader_writer_removed(loop, fileno):
-            raise e.OperationalError("connection socket closed") from ex
 
 
 async def wait_conn_async(gen: PQGenConn[RV], interval: float = 0.0) -> RV:
@@ -261,7 +260,11 @@ async def wait_conn_async(gen: PQGenConn[RV], interval: float = 0.0) -> RV:
             h = loop.call_at(end, set_done)
             try:
                 while True:
-                    await sleep(0)  # let the loop set ready or done
+                    try:
+                        await sleep(0)  # let the loop set ready or done
+                    except BaseException:
+                        h.cancel()
+                        raise
                     if ready:
                         h.cancel()
                         break
